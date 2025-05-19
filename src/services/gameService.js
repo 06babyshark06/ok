@@ -7,7 +7,7 @@ const startTurn = async ({ roomId }, io) => {
   console.log(`LOG : startTurn run ${roomId}`);
   let roomData = await redis.get(`room:${roomId}`);
   roomData = JSON.parse(roomData);
-
+  roomData.isPlaying = true;
   if (roomData.turn === roomData.turnsPerRound) {
     roomData.round += 1;
     roomData.turn = 0;
@@ -37,6 +37,7 @@ const startTurn = async ({ roomId }, io) => {
   roomData.currentWord = "";
 
   io.to(roomId).emit("clearCanvas");
+  console.log(`LOG : startTurn emit clearCanvas ${roomId}`);
   io.to(roomId).emit("startTurn", {
     username,
     turn: roomData.turn,
@@ -113,7 +114,8 @@ const drawing = async ({ roomId, username, drawingData }, io) => {
   }
 };
 
-const guessedCorrectly = async ({ username, roomId, message, timer }, io) => {
+const guessedCorrectly = async ({ username, roomId, message, timer }, socket, io) => {
+  console.log(`guessedCorrectly called service ${username} ${roomId}`);
   let roomData = await redis.get(`room:${roomId}`);
   roomData = JSON.parse(roomData);
 

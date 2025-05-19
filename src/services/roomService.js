@@ -47,9 +47,10 @@ const createRoom = async (
     hints,
     isJoin: true,
     scores: {
-    [username]: 0,
-  },
+      [username]: 0,
+    },
     existingPlayers: [player],
+    isPlaying: false,
     createdAt: Date.now(),
   };
   await redis.set(`room:${roomId}`, JSON.stringify(roomData));
@@ -66,12 +67,12 @@ const createRoom = async (
     hints,
     wordsCount,
   });
-  socket.emit("getRoomData", roomData);
   socket.emit("chatMessage", {
     username,
     type: "create",
     message: `Room ${roomId} created by ${username}`,
   });
+  socket.emit("getRoomData", roomData);
   console.log(`🏠 Room ${roomId} created by ${username}`);
 };
 
@@ -84,17 +85,21 @@ const joinRoom = async ({ username, roomId }, socket, io) => {
     await player.save();
   }
   if (!roomId) {
+    let availableRooms = [];
     const keys = await redis.keys("room:*");
     for (const key of keys) {
       const roomData = JSON.parse(await redis.get(key));
       if (roomData.isJoin) {
-        roomId = roomData.roomId;
-        break;
+        availableRooms.push(roomData.roomId);
       }
     }
+    if (availableRooms.length === 0)
+      return socket.emit("noRoomAvailable", { message: "All rooms are full" });
+    else {
+      roomId =
+        availableRooms[Math.floor(Math.random() * availableRooms.length)];
+    }
   }
-  if (!roomId)
-    return socket.emit("noRoomAvailable", { message: "All rooms are full" });
   const roomKey = `room:${roomId}`;
   let roomData = await redis.get(roomKey);
   if (!roomData)
@@ -139,6 +144,8 @@ const joinRoom = async ({ username, roomId }, socket, io) => {
 };
 
 const getRoomData = async ({ username, roomId }, socket) => {
+  console.log("getRoomData getRoomData called");
+  console.log("getRoomData", roomId);
   if (roomId) {
     let roomData = await redis.get(`room:${roomId}`);
     roomData = JSON.parse(roomData);
@@ -159,5 +166,74 @@ const getRoomData = async ({ username, roomId }, socket) => {
   }
 };
 
+const updateRoom = async (
+  { roomId, occupancy, maxRound, turnsPerRound, wordsCount, drawTime, hints },
+  io
+) => {
+  let roomData = await redis.get(`room:${roomId}`);
+  roomData = JSON.parse(roomData);
+  roomData = {
+    ...roomData,
+    occupancy,
+    maxRound,
+    turnsPerRound,
+    wordsCount,
+    drawTime,
+    hints,
+  };
+  io.to(roomId).emit("getRoomData", roomData);
+  io.to(roomData.roomId).emit("chatMessage", {
+    message: `Room setting updated`,
+    username: "System",
+  });
+  console.log("updateRoom called");
+};
 
-export default { createRoom, joinRoom, getRoomData };
+const leaveRoom = async ({ username, roomId }, io) => {
+  const roomKey = `room:${roomId}`;
+  let roomData = await redis.get(roomKey);
+  if (!roomData) return;
+
+  roomData = JSON.parse(roomData);
+
+  const playerObj = roomData.existingPlayers.find(
+    (p) => p.username === username
+  );
+  if (!playerObj) {
+    console.warn(`User ${username} not found in room ${roomId}`);
+    return;
+  }
+
+  const playerId = playerObj._id;
+
+  roomData.players = roomData.players.filter((p) => p !== playerId);
+
+  roomData.existingPlayers = roomData.existingPlayers.filter(
+    (p) => p.username !== username
+  );
+
+  roomData.isJoin = true;
+
+  const score = roomData.scores[username];
+  delete roomData.scores[username];
+
+  await redis.set(roomKey, JSON.stringify(roomData));
+
+  io.to(roomData.roomId).emit("chatMessage", {
+    username: username,
+    type: "left",
+    message: `${username} left the room`,
+  });
+
+  const player = await Player.findOne({ username });
+  if (player) {
+    player.totalGames += 1;
+    player.highestScore = Math.max(player.highestScore, score || 0);
+    await player.save();
+  }
+
+  io.to(roomData.roomId).emit("getRoomData", roomData);
+  console.log(`getRoomData leaveRoom called ${JSON.stringify(roomData)}`);
+};
+
+export default { createRoom, joinRoom, getRoomData, updateRoom, leaveRoom };
