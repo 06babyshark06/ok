@@ -16,6 +16,7 @@ const createRoom = async (
   },
   socket
 ) => {
+  console.log(`LOG : createRoom ${username}`);
   let player = await Player.findOne({ username });
   if (!player) {
     player = await Player.create({ username, socketID: socket.id });
@@ -23,12 +24,14 @@ const createRoom = async (
     player.socketID = socket.id;
     await player.save();
   }
+  console.log(`LOG : createRoom2 ${username}`);
   const roomId = uuidv4();
   const room = await Room.create({
     roomId,
     name: roomName,
     players: [player._id],
   });
+  console.log(`LOG : createRoom3 ${username}`);
   const roomData = {
     roomId,
     players: [player._id],
@@ -54,6 +57,7 @@ const createRoom = async (
     createdAt: Date.now(),
   };
   await redis.set(`room:${roomId}`, JSON.stringify(roomData));
+  console.log(`LOG : createRoom4 ${username}`);
   socket.join(roomId);
   socket.emit("approveJoin", {
     roomId,
@@ -172,6 +176,7 @@ const updateRoom = async (
 ) => {
   let roomData = await redis.get(`room:${roomId}`);
   roomData = JSON.parse(roomData);
+
   roomData = {
     ...roomData,
     occupancy,
@@ -181,12 +186,16 @@ const updateRoom = async (
     drawTime,
     hints,
   };
+
+  await redis.set(`room:${roomId}`, JSON.stringify(roomData));
+
   io.to(roomId).emit("getRoomData", roomData);
-  io.to(roomData.roomId).emit("chatMessage", {
+  io.to(roomId).emit("chatMessage", {
     message: `Room setting updated`,
     username: "System",
   });
-  console.log("updateRoom called");
+
+  console.log(`LOG : updateRoom called ${roomData.maxRound} ${roomData.wordsCount}`);
 };
 
 const leaveRoom = async ({ username, roomId }, io) => {

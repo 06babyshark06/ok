@@ -3,12 +3,19 @@ import redis from "../config/redis.js";
 import Player from "../models/playerModel.js";
 import Room from "../models/roomModel.js";
 
+const intervalMap = new Map();
+
 const startTurn = async ({ roomId }, io) => {
-  console.log(`LOG : startTurn run ${roomId}`);
   let roomData = await redis.get(`room:${roomId}`);
   roomData = JSON.parse(roomData);
-  roomData.isPlaying = true;
-  if (roomData.turn === roomData.turnsPerRound) {
+  const playerCount = roomData?.players?.length ?? 3;
+  console.log(`LOG : startTurn run ${roomId} ${roomData.maxRound}`);
+
+  if (roomData.round > roomData.maxRound) {
+    roomData.round = 1;
+  }
+
+  if (roomData.turn === playerCount) {
     roomData.round += 1;
     roomData.turn = 0;
   }
@@ -60,30 +67,39 @@ const startGuessing = async ({ roomId, word, username, drawTime }, io) => {
   let roomData = await redis.get(`room:${roomId}`);
   roomData = JSON.parse(roomData);
   roomData.drawTime = drawTime;
-  
+
   roomData.currentWord = word;
   await redis.set(`room:${roomId}`, JSON.stringify(roomData));
-  
-  console.log(`LOG : startGuessing run ${roomId} ${word} ${username} ${drawTime}`);
-  io.to(roomId).emit("startGuessing", { username, word});
-  const waitForDrawTime = new Promise((resolve) => {
+
+  console.log(
+    `LOG : startGuessing run ${roomId} ${word} ${username} ${drawTime}`
+  );
+  io.to(roomId).emit("startGuessing", { username, word });
+
+  if (intervalMap.has(roomId)) {        //xoá interval cũ 
+    clearInterval(intervalMap.get(roomId));
+    intervalMap.delete(roomId);
+  }
+
+  const waitForDrawTime = new Promise((resolve) => {      //tạo interval mới
     const interval = setInterval(async () => {
       drawTime -= 1;
       io.to(roomId).emit("drawTime", { drawTime });
       if (drawTime === 0) {
         clearInterval(interval);
+        intervalMap.delete(roomId); // cleanup
         io.to(roomId).emit("guessingTimeOver", { word });
-        resolve(); 
+        resolve();
       }
     }, 1000);
+
+    intervalMap.set(roomId, interval); // lưu interval mới
   });
 
   await waitForDrawTime;
 
-  if (
-    roomData.turn === roomData.turnsPerRound &&
-    roomData.round === roomData.maxRound
-  ) {
+  const playerCount = roomData?.players?.length ?? 3;
+  if (roomData.turn === playerCount && roomData.round === roomData.maxRound) {
     io.to(roomId).emit("gameOver", { message: "Game Over" });
   } else {
     await startTurn({ roomId }, io);
@@ -114,7 +130,11 @@ const drawing = async ({ roomId, username, drawingData }, io) => {
   }
 };
 
-const guessedCorrectly = async ({ username, roomId, message, timer }, socket, io) => {
+const guessedCorrectly = async (
+  { username, roomId, message, timer },
+  socket,
+  io
+) => {
   console.log(`guessedCorrectly called service ${username} ${roomId}`);
   let roomData = await redis.get(`room:${roomId}`);
   roomData = JSON.parse(roomData);
@@ -128,7 +148,7 @@ const guessedCorrectly = async ({ username, roomId, message, timer }, socket, io
       roomData.guessedCorrectlyPeople.push(username);
 
       //tính điểm
-      const drawTime = roomData.drawTime || 60; 
+      const drawTime = roomData.drawTime || 60;
       let score = Math.round((timer / drawTime) * 1000);
 
       if (!roomData.scores[username]) roomData.scores[username] = 0;
@@ -137,10 +157,32 @@ const guessedCorrectly = async ({ username, roomId, message, timer }, socket, io
 
       await redis.set(`room:${roomId}`, JSON.stringify(roomData));
       io.to(roomId).emit("guessedCorrectly", { username, score });
+
+      const totalGuessers = roomData.players.length - 1; // trừ người vẽ
+      if (roomData.guessedCorrectlyPeople.length === totalGuessers) {
+        console.log(
+          `✅ All players guessed correctly in room ${roomId}. Ending turn.`
+        );
+
+        io.to(roomId).emit("allGuessedCorrectly", {
+          message: "All players guessed correctly!",
+          word: roomData.currentWord,
+        });
+        const playerCount = roomData?.players?.length ?? 3;
+        if (
+          roomData.turn === playerCount &&
+          roomData.round === roomData.maxRound
+        ) {
+            console.log(`LOG : gameOver ${roomData.round} ${roomData.maxRound}`);
+          io.to(roomId).emit("gameOver", { message: "Game Over" });
+          
+        } else {
+          await startTurn({ roomId }, io);
+        }
+      }
     }
   }
 };
-
 
 const endTurn = async ({ roomId, username, score }, io) => {
   let roomData = await redis.get(`room:${roomId}`);
@@ -158,12 +200,9 @@ const gameOver = async ({ roomId, username, score }, io) => {
   player.totalGames += 1;
   player.highestScore = Math.max(player.highestScore, score);
   await player.save();
-
   let roomData = await redis.get(`room:${roomId}`);
   roomData = JSON.parse(roomData);
-
   roomData.players = roomData.players.filter((p) => p.username !== username);
-
   if (roomData.players.length === 0) {
     const room = await Room.findOne({ roomId });
     room.occupancy = roomData.occupancy;
@@ -174,9 +213,19 @@ const gameOver = async ({ roomId, username, score }, io) => {
     await room.save();
     await redis.del(`room:${roomId}`);
   } else {
+    if (!roomData.scores[username]) roomData.scores[username] = 0;
     roomData.scores[username] += score;
+    const sortedScores = Object.entries(roomData.scores)
+      .sort((a, b) => b[1] - a[1])
+      .map(([username, score]) => ({ username, score }));
+
+    console.log(`📊 Leaderboard for room ${roomId}:`);
+    sortedScores.forEach((entry, index) => {
+      console.log(`${index + 1}. ${entry.username}: ${entry.score}`);
+    });
+
     await redis.set(`room:${roomId}`, JSON.stringify(roomData));
-    io.to(roomId).emit("leaderboard", { scores: roomData.scores });
+    io.to(roomId).emit("leaderboard", { scores: sortedScores });
   }
 };
 
@@ -187,6 +236,14 @@ const handlePlayerLeave = async ({ roomId, username }, io) => {
   let roomData = JSON.parse(roomDataRaw);
 
   roomData.players = roomData.players.filter((p) => p !== username);
+
+  if (roomData.players.length === 1) {
+    await redis.del(`room:${roomId}`);
+    io.to(roomId).emit("gameOver", {
+      message: `Game ended.`,
+    });
+    return;
+  }
 
   if (roomData.drawingPlayer === username) {
     roomData.guessedCorrectlyPeople = [];
